@@ -1,21 +1,24 @@
-# Bias Detector using Llama Language Model
-from transformers import AutoTokenizer, LlamaForSequenceClassification
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
 from datasets import load_dataset, Dataset
 from transformers import TrainingArguments, Trainer
 import torch
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from typing import Dict, Union, Tuple
+from typing import Dict, Union, Tuple, List
+from PIL import Image
+import pytesseract
+from moviepy.editor import VideoFileClip
+import cv2
 
-class LlamaBiasDetector:
+class MultilingualBiasDetector:
     """
-    A class to detect gender bias in text using a fine-tuned language model.
+    A class to detect bias in text, images, and videos across multiple languages.
     """
     
-    def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B-Instruct", device: str = "cuda"):
+    def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B", device: str = "cuda"):
         """
-        Initialize the bias detector with a specified model.
+        Initialize the multilingual bias detector.
         
         Args:
             model_name (str): Name of the pretrained model to use
@@ -23,18 +26,67 @@ class LlamaBiasDetector:
         """
         self.device = device if torch.cuda.is_available() else "cpu"
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = LlamaForSequenceClassification.from_pretrained(
+        self.model = AutoModelForSequenceClassification.from_pretrained(
             model_name,
-            num_labels=2,  # Binary classification: biased or unbiased
-            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
+            num_labels=2
         ).to(self.device)
         
-        # Resize token embeddings for classification
-        self.model.resize_token_embeddings(len(self.tokenizer))
+        # Initialize translation pipelines
+        self.translation_pipelines = {
+            'ar': pipeline("translation", model="Helsinki-NLP/opus-mt-en-ar"),
+            'sw': pipeline("translation", model="Helsinki-NLP/opus-mt-en-swh"),
+        }
+    
+    def translate_text(self, text: str, target_lang: str) -> str:
+        """
+        Translate text to the target language.
         
-        # Enable gradient checkpointing for memory efficiency
-        self.model.gradient_checkpointing_enable()
+        Args:
+            text (str): Input text
+            target_lang (str): Target language code ('ar' for Arabic, 'sw' for Swahili)
         
+        Returns:
+            Translated text
+        """
+        if target_lang not in self.translation_pipelines:
+            raise ValueError(f"Unsupported target language: {target_lang}")
+        
+        return self.translation_pipelines[target_lang](text)[0]['translation_text']
+    
+    def extract_text_from_image(self, image_path: str) -> str:
+        """
+        Extract text from an image using OCR.
+        
+        Args:
+            image_path (str): Path to the image file
+        
+        Returns:
+            Extracted text
+        """
+        image = Image.open(image_path)
+        return pytesseract.image_to_string(image)
+    
+    def extract_text_from_video(self, video_path: str) -> List[str]:
+        """
+        Extract text from video frames.
+        
+        Args:
+            video_path (str): Path to the video file
+        
+        Returns:
+            List of extracted text from frames
+        """
+        texts = []
+        video = VideoFileClip(video_path)
+        
+        for frame in video.iter_frames(fps=1):  # Process 1 frame per second
+            frame_pil = Image.fromarray(frame)
+            text = pytesseract.image_to_string(frame_pil)
+            if text.strip():
+                texts.append(text)
+        
+        return texts
+
     def prepare_dataset(self, data_path: Union[str, pd.DataFrame]) -> Tuple[Dataset, Dataset]:
         """
         Prepare dataset from a CSV file or pandas DataFrame.
@@ -52,33 +104,21 @@ class LlamaBiasDetector:
         else:
             raise ValueError("Input must be a path to a CSV file or a pandas DataFrame.")
         
-        # Splitting the data into train and validation sets
         train_df, val_df = train_test_split(df, test_size=0.2, random_state=42)
         
-        # Create datasets from pandas DataFrame
-        train_dataset = Dataset.from_pandas(train_df)
-        val_dataset = Dataset.from_pandas(val_df)
-        
-        return train_dataset, val_dataset
+        return Dataset.from_pandas(train_df), Dataset.from_pandas(val_df)
     
     def train(self, train_dataset: Dataset, val_dataset: Dataset):
         """
         Train the model using the provided datasets.
-        
-        Args:
-            train_dataset: Training dataset
-            val_dataset: Validation dataset
         """
         training_args = TrainingArguments(
             output_dir='./results',
-            per_device_train_batch_size=4,
-            per_device_eval_batch_size=4,
+            per_device_train_batch_size=8,
+            per_device_eval_batch_size=8,
             num_train_epochs=3,
             evaluation_strategy="epoch",
             logging_dir='./logs',
-            logging_steps=10,
-            save_steps=500,
-            save_total_limit=2,
         )
         
         trainer = Trainer(
@@ -90,16 +130,21 @@ class LlamaBiasDetector:
         
         trainer.train()
     
-    def predict(self, text: str) -> Dict[str, Union[str, float]]:
+    def predict(self, text: str, language: str = 'en') -> Dict[str, Union[str, float]]:
         """
         Make predictions on whether the text is biased or unbiased.
         
         Args:
             text (str): Input text for bias detection
+            language (str): Language of the input text ('en', 'ar', or 'sw')
         
         Returns:
-            Dictionary containing the prediction ('biased' or 'unbiased') and the confidence score
+            Dictionary containing the prediction and confidence score
         """
+        if language != 'en':
+            # Translate to English for processing
+            text = self.translate_text(text, 'en')
+        
         inputs = self.tokenizer(text, return_tensors="pt", truncation=True, padding=True).to(self.device)
         outputs = self.model(**inputs)
         logits = outputs.logits
@@ -107,47 +152,52 @@ class LlamaBiasDetector:
         prediction = torch.argmax(logits, dim=1)
         probabilities = torch.nn.functional.softmax(logits, dim=1)
         
-        return {
+        result = {
             "prediction": "biased" if prediction.item() == 1 else "unbiased",
             "confidence": probabilities[0][prediction.item()].item()
         }
+        
+        if language != 'en':
+            # Translate result back to original language
+            result["prediction_translated"] = self.translate_text(result["prediction"], language)
+        
+        return result
 
 def main():
     """
-    Main function to demonstrate the usage of the bias detector.
+    Main function to demonstrate the usage of the multilingual bias detector.
     """
     try:
-        # Load Wino Bias dataset
-        ds_anti = load_dataset("uclanlp/wino_bias", "type2_anti")
-        ds_pro = load_dataset("uclanlp/wino_bias", "type2_pro")
+        detector = MultilingualBiasDetector()
         
-        # Initialize detector
-        detector = LlamaBiasDetector()
+        # Example with text in different languages
+        texts = {
+            'en': "All individuals should have equal opportunities.",
+            'ar': "يجب أن يحصل الجميع على فرص متساوية.",
+            'sw': "Watu wote wanapaswa kuwa na fursa sawa."
+        }
         
-        # Use a subset of the anti-bias dataset for demonstration
-        example_data = pd.DataFrame({
-            "text": ds_anti['train']['sentence'][:6],
-            "label": [1 if "female" in text else 0 for text in ds_anti['train']['sentence'][:6]]  # Simplified labeling
-        })
-        
-        train_dataset, val_dataset = detector.prepare_dataset(example_data)
-        
-        # Train the model
-        detector.train(train_dataset, val_dataset)
-        
-        # Example predictions
-        test_texts = [
-            "Women are not suited for leadership positions.",
-            "All individuals should have equal opportunities in education."
-        ]
-        
-        for text in test_texts:
-            result = detector.predict(text)
+        for lang, text in texts.items():
+            result = detector.predict(text, language=lang)
+            print(f"Language: {lang}")
             print(f"Text: {text}")
             print(f"Prediction: {result['prediction']}")
+            if 'prediction_translated' in result:
+                print(f"Prediction (translated): {result['prediction_translated']}")
             print(f"Confidence: {result['confidence']:.4f}")
             print()
-            
+        
+        # Example with image
+        image_text = detector.extract_text_from_image("path/to/your/image.jpg")
+        image_result = detector.predict(image_text)
+        print(f"Image text prediction: {image_result['prediction']}")
+        
+        # Example with video
+        video_texts = detector.extract_text_from_video("path/to/your/video.mp4")
+        for i, text in enumerate(video_texts):
+            video_result = detector.predict(text)
+            print(f"Video frame {i} prediction: {video_result['prediction']}")
+        
     except Exception as e:
         print(f"An error occurred: {str(e)}")
 
