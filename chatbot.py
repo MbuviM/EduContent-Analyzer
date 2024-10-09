@@ -6,6 +6,7 @@ import json
 from PyPDF2 import PdfReader
 import logging
 import re
+from pydantic import BaseModel
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -63,7 +64,7 @@ def get_bot_response(user_input, context):
         payload = {
             "inputs": prompt,
             "parameters": {
-                "max_new_tokens": 512,
+                "max_new_tokens": 300,
                 "top_p": 1.0,
                 "temperature": 1.0
             }
@@ -103,11 +104,17 @@ def get_bot_response(user_input, context):
         error_msg = f"Error invoking SageMaker endpoint: {str(e)}"
         logger.error(error_msg)
         return f"Error: {error_msg}"
+    
+# Define the input model
+class QueryModel(BaseModel):
+    input: str
 
+
+# Define the ask_bot endpoint
 @app.post("/ask")
-async def ask_bot(input: str):
-    context = " ".join(retrieve_documents(input))
-    bot_response = get_bot_response(input, context)
+async def ask_bot(query: QueryModel):
+    context = " ".join(retrieve_documents(query.input))
+    bot_response = get_bot_response(query.input, context)
     return {"answer": bot_response}
 
 if __name__ == "__main__":
