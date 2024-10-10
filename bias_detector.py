@@ -6,7 +6,7 @@ from flask import Flask, request, jsonify
 app = Flask(__name__)
 
 # Initialize the Groq client with your API key from environment variable
-groq_client = Groq(api_key="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")
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 # Hardcoded dictionary of gender-biased words and their suggestions
 GENDER_BIAS_DICTIONARY = {
