@@ -1,205 +1,195 @@
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
-from datasets import load_dataset, Dataset
-from transformers import TrainingArguments, Trainer
-import torch
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split
-from typing import Dict, Union, Tuple, List
-from PIL import Image
-import pytesseract
-from moviepy.editor import VideoFileClip
-import cv2
+import json
+import os
+from groq import Groq
+from flask import Flask, request, jsonify
 
-class MultilingualBiasDetector:
-    """
-    A class to detect bias in text, images, and videos across multiple languages.
-    """
+app = Flask(__name__)
+
+# Initialize the Groq client with your API key from environment variable
+groq_client = Groq(api_key="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")
+
+# Hardcoded dictionary of gender-biased words and their suggestions
+GENDER_BIAS_DICTIONARY = {
+    "mankind": ["humankind", "humanity", "people"],
+    "manpower": ["workforce", "personnel", "staff", "human resources"],
+    "chairman": ["chairperson", "chair", "head"],
+    "businessman": ["business person", "business professional", "executive"],
+    "businesswoman": ["business person", "business professional", "executive"],
+    "salesman": ["salesperson", "sales representative", "sales associate"],
+    "saleswoman": ["salesperson", "sales representative", "sales associate"],
+    "policeman": ["police officer", "law enforcement officer"],
+    "policewoman": ["police officer", "law enforcement officer"],
+    "fireman": ["firefighter", "first responder"],
+    "firewoman": ["firefighter", "first responder"],
+    "mailman": ["mail carrier", "postal worker", "letter carrier"],
+    "stewardess": ["flight attendant"],
+    "steward": ["flight attendant"],
+    "actress": ["actor", "performer"],
+    "waitress": ["server", "wait staff", "waiter"],
+    "waiter": ["server", "wait staff"],
+    "housewife": ["homemaker", "stay-at-home parent"],
+    "househusband": ["homemaker", "stay-at-home parent"],
+    "manmade": ["artificial", "synthetic", "manufactured", "human-made"],
+    "freshman": ["first-year student", "first-year"],
+    "upperclassman": ["upper-year student", "upper-year"],
+    "guys": ["everyone", "folks", "team", "all", "y'all"],
+    "man-hours": ["work hours", "person-hours", "labor hours"],
+    "man of the house": ["head of household", "family leader"],
+    "woman of the house": ["head of household", "family leader"],
+    "mother nature": ["nature", "the environment"],
+    "king-size": ["extra-large", "oversized"],
+    "queen-size": ["large"],
+    "girl friday": ["assistant", "aide"],
+    "gentleman's agreement": ["informal agreement", "unwritten agreement"],
+    "master bedroom": ["primary bedroom", "main bedroom"],
+    "mistress bedroom": ["primary bedroom", "main bedroom"],
+    "maternal instinct": ["parental instinct"],
+    "paternal instinct": ["parental instinct"],
+    "career woman": ["professional", "career person"],
+    "career man": ["professional", "career person"],
+    "working mother": ["working parent"],
+    "working father": ["working parent"],
+    "forefathers": ["ancestors", "predecessors"],
+    "lady doctor": ["doctor", "physician"],
+    "male nurse": ["nurse"],
+    "female lawyer": ["lawyer", "attorney"],
+    "male secretary": ["secretary", "administrative assistant"],
+    "tomboy": ["energetic child", "active child"],
+    "sissy": ["timid person", "coward"],
+    "grow a pair": ["be brave", "have courage"],
+    "man up": ["be strong", "be resilient"],
+    "like a girl": ["poorly", "weakly"],
+    "boys will be boys": ["children will be children", "people will misbehave"],
+    "don't be such a girl": ["don't be so sensitive", "be more resilient"],
+    "old maid": ["unmarried person", "single person"],
+    "spinster": ["unmarried person", "single person"],
+    "bachelor": ["unmarried person", "single person"],
+    "mothering": ["nurturing", "caring"],
+    "fathering": ["parenting"],
+    "workmanship": ["craftsmanship", "quality of work"],
+    "mankind's achievements": ["human achievements", "humanity's achievements"],
+    "the common man": ["the average person", "ordinary people"],
+    "no man's land": ["unclaimed territory", "buffer zone"],
+    "man-to-man defense": ["player-to-player defense", "one-on-one defense"],
+    "man of the year": ["person of the year"],
+    "woman of the year": ["person of the year"],
+    "sportsmanship": ["fair play", "good sport behavior"],
+    "maiden name": ["birth name", "family name"],
+    "mankind's greatest adventure": ["humanity's greatest adventure"],
+    "man of action": ["person of action", "go-getter"],
+    "woman of action": ["person of action", "go-getter"]
+}
+
+def read_file_safely(file):
+    encodings = ['utf-8', 'latin-1', 'utf-16', 'ISO-8859-1']
+    for encoding in encodings:
+        try:
+            content = file.read()
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            file.seek(0)  # Reset file pointer for next attempt
+            continue
+    raise UnicodeDecodeError(f"Failed to decode the file with tried encodings: {encodings}")
+
+def analyze_text_with_dictionary(text):
+    found_biases = []
+    text_lower = text.lower()
+    bias_score = 0
     
-    def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B", device: str = "cuda"):
-        """
-        Initialize the multilingual bias detector.
-        
-        Args:
-            model_name (str): Name of the pretrained model to use
-            device (str): Device to run the model on ('cuda' or 'cpu')
-        """
-        self.device = device if torch.cuda.is_available() else "cpu"
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSequenceClassification.from_pretrained(
-            model_name,
-            num_labels=2
-        ).to(self.device)
-        
-        # Initialize translation pipelines
-        self.translation_pipelines = {
-            'ar': pipeline("translation", model="Helsinki-NLP/opus-mt-en-ar"),
-            'sw': pipeline("translation", model="Helsinki-NLP/opus-mt-en-swh"),
+    for biased_word, alternatives in GENDER_BIAS_DICTIONARY.items():
+        if biased_word.lower() in text_lower:
+            found_biases.append({
+                "biased_text": biased_word,
+                "explanation": f"Found gender-specific term that could be replaced with more inclusive language.",
+                "alternatives": alternatives
+            })
+            bias_score += 0.1
+    
+    return {
+        "dictionary_results": {
+            "bias_score": min(bias_score, 1.0),
+            "suggestions": found_biases
         }
-    
-    def translate_text(self, text: str, target_lang: str) -> str:
-        """
-        Translate text to the target language.
-        
-        Args:
-            text (str): Input text
-            target_lang (str): Target language code ('ar' for Arabic, 'sw' for Swahili)
-        
-        Returns:
-            Translated text
-        """
-        if target_lang not in self.translation_pipelines:
-            raise ValueError(f"Unsupported target language: {target_lang}")
-        
-        return self.translation_pipelines[target_lang](text)[0]['translation_text']
-    
-    def extract_text_from_image(self, image_path: str) -> str:
-        """
-        Extract text from an image using OCR.
-        
-        Args:
-            image_path (str): Path to the image file
-        
-        Returns:
-            Extracted text
-        """
-        image = Image.open(image_path)
-        return pytesseract.image_to_string(image)
-    
-    def extract_text_from_video(self, video_path: str) -> List[str]:
-        """
-        Extract text from video frames.
-        
-        Args:
-            video_path (str): Path to the video file
-        
-        Returns:
-            List of extracted text from frames
-        """
-        texts = []
-        video = VideoFileClip(video_path)
-        
-        for frame in video.iter_frames(fps=1):  # Process 1 frame per second
-            frame_pil = Image.fromarray(frame)
-            text = pytesseract.image_to_string(frame_pil)
-            if text.strip():
-                texts.append(text)
-        
-        return texts
+    }
 
-    def prepare_dataset(self, data_path: Union[str, pd.DataFrame]) -> Tuple[Dataset, Dataset]:
-        """
-        Prepare dataset from a CSV file or pandas DataFrame.
-        
-        Args:
-            data_path: Path to CSV file or pandas DataFrame with 'text' and 'label' columns
-        
-        Returns:
-            Tuple of train and validation datasets
-        """
-        if isinstance(data_path, str):
-            df = pd.read_csv(data_path)
-        elif isinstance(data_path, pd.DataFrame):
-            df = data_path
-        else:
-            raise ValueError("Input must be a path to a CSV file or a pandas DataFrame.")
-        
-        train_df, val_df = train_test_split(df, test_size=0.2, random_state=42)
-        
-        return Dataset.from_pandas(train_df), Dataset.from_pandas(val_df)
+def process_text_for_bias(text):
+    # First, get dictionary results
+    dictionary_analysis = analyze_text_with_dictionary(text)
     
-    def train(self, train_dataset: Dataset, val_dataset: Dataset):
-        """
-        Train the model using the provided datasets.
-        """
-        training_args = TrainingArguments(
-            output_dir='./results',
-            per_device_train_batch_size=8,
-            per_device_eval_batch_size=8,
-            num_train_epochs=3,
-            evaluation_strategy="epoch",
-            logging_dir='./logs',
-        )
-        
-        trainer = Trainer(
-            model=self.model,
-            args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=val_dataset,
-        )
-        
-        trainer.train()
-    
-    def predict(self, text: str, language: str = 'en') -> Dict[str, Union[str, float]]:
-        """
-        Make predictions on whether the text is biased or unbiased.
-        
-        Args:
-            text (str): Input text for bias detection
-            language (str): Language of the input text ('en', 'ar', or 'sw')
-        
-        Returns:
-            Dictionary containing the prediction and confidence score
-        """
-        if language != 'en':
-            # Translate to English for processing
-            text = self.translate_text(text, 'en')
-        
-        inputs = self.tokenizer(text, return_tensors="pt", truncation=True, padding=True).to(self.device)
-        outputs = self.model(**inputs)
-        logits = outputs.logits
-        
-        prediction = torch.argmax(logits, dim=1)
-        probabilities = torch.nn.functional.softmax(logits, dim=1)
-        
-        result = {
-            "prediction": "biased" if prediction.item() == 1 else "unbiased",
-            "confidence": probabilities[0][prediction.item()].item()
-        }
-        
-        if language != 'en':
-            # Translate result back to original language
-            result["prediction_translated"] = self.translate_text(result["prediction"], language)
-        
-        return result
+    api_request_json = {
+        "model": "llama-3.1-8b-instant",
+        "messages": [
+            {
+                "role": "system",
+                "content": """You are an AI assistant specialized in detecting gender bias in text.
+                Your task is to:
+                1. Analyze the given text for gender bias, stereotypes, and unequal treatment
+                2. Identify specific phrases or words that show gender bias
+                3. Provide alternatives for biased language
+                4. Assign a bias score from 0 (no bias) to 1 (extremely biased)
+                
+                Respond ONLY with a JSON object in this exact format:
+                {
+                    "bias_score": <number between 0 and 1>,
+                    "suggestions": [
+                        {
+                            "biased_text": "<exact text from input that shows bias>",
+                            "explanation": "<brief explanation of why this is biased>",
+                            "alternatives": ["<alternative 1>", "<alternative 2>"]
+                        }
+                    ]
+                }
+                
+                Focus ONLY on gender bias. Do not comment on JSON formatting or other types of bias."""
+            },
+            {"role": "user", "content": text}
+        ],
+        "temperature": 0.3,  # Lowered temperature for more consistent output
+        "max_tokens": 1000,
+        "response_format": {"type": "json_object"}
+    }
 
-def main():
-    """
-    Main function to demonstrate the usage of the multilingual bias detector.
-    """
     try:
-        detector = MultilingualBiasDetector()
+        response = groq_client.chat.completions.create(**api_request_json)
+        llm_analysis = json.loads(response.choices[0].message.content)
         
-        # Example with text in different languages
-        texts = {
-            'en': "All individuals should have equal opportunities.",
-            'ar': "يجب أن يحصل الجميع على فرص متساوية.",
-            'sw': "Watu wote wanapaswa kuwa na fursa sawa."
+        # Combine dictionary and LLM results
+        combined_suggestions = dictionary_analysis["dictionary_results"]["suggestions"]
+        if "suggestions" in llm_analysis:
+            combined_suggestions.extend(llm_analysis["suggestions"])
+        
+        combined_score = max(
+            dictionary_analysis["dictionary_results"]["bias_score"],
+            llm_analysis.get("bias_score", 0.0)
+        )
+        
+        return {
+            "bias_score": combined_score,
+            "suggestions": combined_suggestions
         }
-        
-        for lang, text in texts.items():
-            result = detector.predict(text, language=lang)
-            print(f"Language: {lang}")
-            print(f"Text: {text}")
-            print(f"Prediction: {result['prediction']}")
-            if 'prediction_translated' in result:
-                print(f"Prediction (translated): {result['prediction_translated']}")
-            print(f"Confidence: {result['confidence']:.4f}")
-            print()
-        
-        # Example with image
-        image_text = detector.extract_text_from_image("path/to/your/image.jpg")
-        image_result = detector.predict(image_text)
-        print(f"Image text prediction: {image_result['prediction']}")
-        
-        # Example with video
-        video_texts = detector.extract_text_from_video("path/to/your/video.mp4")
-        for i, text in enumerate(video_texts):
-            video_result = detector.predict(text)
-            print(f"Video frame {i} prediction: {video_result['prediction']}")
-        
     except Exception as e:
-        print(f"An error occurred: {str(e)}")
+        # Fallback to dictionary results if API fails
+        return {
+            "bias_score": dictionary_analysis["dictionary_results"]["bias_score"],
+            "suggestions": dictionary_analysis["dictionary_results"]["suggestions"],
+            "note": f"Used dictionary-only analysis due to API error: {str(e)}"
+        }
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    
+    file = request.files['file']
+    
+    try:
+        text = read_file_safely(file)
+        result = process_text_for_bias(text)
+        return jsonify(result)
+    except UnicodeDecodeError as e:
+        return jsonify({'error': f"Failed to read file: {str(e)}"}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == "__main__":
-    main()
+    app.run(debug=True)
